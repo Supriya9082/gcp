@@ -1,3 +1,7 @@
+# cloudbuild-job.yaml
+options:
+  # Use only Cloud Logging (no bucket); satisfies the requirement when a custom service account is used.
+  logging: CLOUD_LOGGING_ONLY
 
 steps:
 - name: 'gcr.io/cloud-builders/docker'
@@ -6,7 +10,6 @@ steps:
     - '-t'
     - '${_REGION}-docker.pkg.dev/$PROJECT_ID/job-repo/supabase-job:$SHORT_SHA'
     - '.'
-    
 
 - name: 'gcr.io/cloud-builders/docker'
   args:
@@ -15,5 +18,3 @@ steps:
 
 images:
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/job-repo/supabase-job:$SHORT_SHA'
-
-
