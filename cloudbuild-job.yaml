@@ -1,12 +1,16 @@
-options:
-  logging: CLOUD_LOGGING_ONLY
-
+# cloudbuild-job.yaml
 steps:
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'asia-south1-docker.pkg.dev/$PROJECT_ID/job-repo/supabase-job:$SHORT_SHA', '.']
+  args:
+    - 'build'
+    - '-t'
+    - '${_REGION}-docker.pkg.dev/$PROJECT_ID/job-repo/supabase-job:$SHORT_SHA'
+    - '.'
 
 - name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'asia-south1-docker.pkg.dev/$PROJECT_ID/job-repo/supabase-job:$SHORT_SHA']
+  args:
+    - 'push'
+    - '${_REGION}-docker.pkg.dev/$PROJECT_ID/job-repo/supabase-job:$SHORT_SHA'
 
 images:
-- 'asia-south1-docker.pkg.dev/$PROJECT_ID/job-repo/supabase-job:$SHORT_SHA'
+- '${_REGION}-docker.pkg.dev/$PROJECT_ID/job-repo/supabase-job:$SHORT_SHA'
