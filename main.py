@@ -12,6 +12,7 @@ def get_secret(secret_name: str):
 
 def main():
     SUPABASE_URL = os.getenv("SUPABASE_URL") or get_secret("supabase-url")
+    
     SUPABASE_KEY = os.getenv("SUPABASE_KEY") or get_secret("supabase-key")
 
     sb = create_client(SUPABASE_URL, SUPABASE_KEY)
