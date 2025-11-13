@@ -14,3 +14,4 @@ steps:
 
 images:
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/job-repo/supabase-job:$SHORT_SHA'
+
