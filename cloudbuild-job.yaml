@@ -1,4 +1,4 @@
-cat > cloudbuild-job.yaml <<'YAML'
+
 steps:
 - name: 'gcr.io/cloud-builders/docker'
   args:
@@ -14,8 +14,5 @@ steps:
 
 images:
 - '${_REGION}-docker.pkg.dev/$PROJECT_ID/job-repo/supabase-job:$SHORT_SHA'
-YAML
 
-git add cloudbuild-job.yaml
-git commit -m "cloudbuild: use ${_REGION} substitution for artifact registry"
-git push origin main
+
