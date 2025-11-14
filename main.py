@@ -90,8 +90,8 @@ def upsert_safe(sb, table, rows):
 def main():
     try:
         # Prefer env vars; fallback to Secret Manager
-        SUPABASE_URL = os.getenv("supabase-url") or read_secret("supabase-url")
-        SUPABASE_KEY = os.getenv("supabase-key") or read_secret("supabase-key")
+        SUPABASE_URL = os.getenv("supabase_url") or read_secret("supabase-url")
+        SUPABASE_KEY = os.getenv("supabase_key") or read_secret("supabase-key")
 
         if not SUPABASE_URL or not SUPABASE_KEY:
             log.error("SUPABASE_URL and SUPABASE_KEY must be provided as env vars or secrets.")
