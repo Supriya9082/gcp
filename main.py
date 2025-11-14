@@ -5,6 +5,7 @@ from google.cloud import secretmanager
 
 
 def get_secret(secret_name: str):
+    
     project = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT")
     if not project:
         raise RuntimeError("PROJECT_ID / GCP_PROJECT env var is not set. Set PROJECT_ID in the Dockerfile or pass it as an env var.")
