@@ -72,14 +72,13 @@ def normalize_row(r):
         return {}
 
 
-def upsert_rows_with_conflict(sb, table_name, rows, conflict_key="symbol"):
+def upsert_safe(sb, table_name, rows):
     """
-    Perform an upsert with explicit on_conflict to avoid duplicate-key errors.
+    Upsert rows using the supabase client without passing on_conflict (some clients don't support it).
     Returns True on success, False on failure.
     """
     try:
-        # ensure client supports this call signature (most supabase clients do)
-        up = sb.table(table_name).upsert(rows, on_conflict=conflict_key).execute()
+        up = sb.table(table_name).upsert(rows).execute()
         err = getattr(up, "error", None) or (up.get("error") if isinstance(up, dict) else None)
         if err:
             log.error("Upsert returned error: %s", err)
@@ -106,7 +105,6 @@ def main():
         batch_size = int(os.getenv("BATCH_SIZE", "500"))
         source_table = os.getenv("SOURCE_TABLE", "bse_company")
         target_table = os.getenv("TARGET_TABLE", "company_symbols")
-        conflict_key = os.getenv("UPSERT_CONFLICT_KEY", "symbol")
 
         offset = 0
         total_processed = 0
@@ -130,7 +128,7 @@ def main():
                     normalized.append(nr)
 
             if normalized:
-                ok = upsert_rows_with_conflict(sb, target_table, normalized, conflict_key)
+                ok = upsert_safe(sb, target_table, normalized)
                 if not ok:
                     log.error("Upsert/insert failed at offset=%d — aborting job.", offset)
                     sys.exit(4)
