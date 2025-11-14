@@ -2,11 +2,12 @@
 import os
 import sys
 import time
-import traceback
 import logging
+import traceback
 
 from supabase import create_client
 
+# optional: used only if env vars not provided and job SA has Secret Manager access
 try:
     from google.cloud import secretmanager
 except Exception:
@@ -17,129 +18,137 @@ log = logging.getLogger("supabase-job")
 
 
 def read_secret(secret_name: str):
-    """Try to read a secret from Secret Manager (fallback only)."""
+    """Return secret value from Secret Manager (fallback)."""
     if secretmanager is None:
         return None
     try:
         project = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT")
         if not project:
+            log.debug("PROJECT_ID/GCP_PROJECT not set; cannot read secrets from Secret Manager.")
             return None
         client = secretmanager.SecretManagerServiceClient()
         name = f"projects/{project}/secrets/{secret_name}/versions/latest"
         resp = client.access_secret_version(request={"name": name})
         return resp.payload.data.decode("utf-8")
-    except Exception:
+    except Exception as e:
+        log.warning("Failed to read secret %s from Secret Manager: %s", secret_name, e)
         return None
 
 
+def get_supabase_credentials():
+    """Robust lookup for Supabase credentials from env vars or Secret Manager."""
+    SUPABASE_URL = (
+        os.getenv("SUPABASE_URL")
+        or os.getenv("supabase_url")
+        or os.getenv("supabase-url")
+        or read_secret("supabase-url")
+    )
+    SUPABASE_KEY = (
+        os.getenv("SUPABASE_KEY")
+        or os.getenv("supabase_key")
+        or os.getenv("supabase-key")
+        or read_secret("supabase-key")
+    )
+    return SUPABASE_URL, SUPABASE_KEY
+
+
 def extract_rows(resp):
-    """Return response rows from supabase client response."""
+    """Return a python list of rows from a supabase response object or dict."""
     if resp is None:
         return []
-    d = getattr(resp, "data", None)
-    if d is None and isinstance(resp, dict):
-        d = resp.get("data")
-    return d or []
+    data = getattr(resp, "data", None)
+    if data is None and isinstance(resp, dict):
+        data = resp.get("data")
+    return data or []
 
 
 def normalize_row(r):
-    """Normalize dict- or object-like row into a python dict."""
+    """Return a dict with only the fields we care about."""
     if isinstance(r, dict):
-        return {
-            "symbol": r.get("symbol"),
-            "name": r.get("name"),
-            "listed": r.get("listed")
-        }
+        return {"symbol": r.get("symbol"), "name": r.get("name"), "listed": r.get("listed")}
     try:
-        return {
-            "symbol": getattr(r, "symbol", None),
-            "name": getattr(r, "name", None),
-            "listed": getattr(r, "listed", None)
-        }
+        return {"symbol": getattr(r, "symbol", None), "name": getattr(r, "name", None), "listed": getattr(r, "listed", None)}
     except Exception:
         return {}
 
 
-def upsert_safe(sb, table, rows):
-    """Try upsert, fallback to insert."""
+def upsert_rows_with_conflict(sb, table_name, rows, conflict_key="symbol"):
+    """
+    Perform an upsert with explicit on_conflict to avoid duplicate-key errors.
+    Returns True on success, False on failure.
+    """
     try:
-        up = sb.table(table).upsert(rows).execute()
+        # ensure client supports this call signature (most supabase clients do)
+        up = sb.table(table_name).upsert(rows, on_conflict=conflict_key).execute()
         err = getattr(up, "error", None) or (up.get("error") if isinstance(up, dict) else None)
         if err:
-            log.warning("Upsert returned error: %s. Trying insert fallback.", err)
-            ins = sb.table(table).insert(rows).execute()
-            err2 = getattr(ins, "error", None) or (ins.get("error") if isinstance(ins, dict) else None)
-            if err2:
-                log.error("Insert fallback failed: %s", err2)
-                return False
+            log.error("Upsert returned error: %s", err)
+            return False
         return True
     except Exception as e:
-        log.warning("Upsert raised exception: %s. Trying insert fallback.", e)
-        try:
-            ins = sb.table(table).insert(rows).execute()
-            err2 = getattr(ins, "error", None) or (ins.get("error") if isinstance(ins, dict) else None)
-            if err2:
-                log.error("Insert fallback failed after exception: %s", err2)
-                return False
-            return True
-        except Exception as ex:
-            log.error("Final fallback failed: %s", ex)
-            return False
+        log.exception("Upsert call raised exception: %s", e)
+        return False
 
 
 def main():
     try:
-        # Prefer env vars; fallback to Secret Manager
-        SUPABASE_URL = os.getenv("supabase_url") or read_secret("supabase-url")
-        SUPABASE_KEY = os.getenv("supabase_key") or read_secret("supabase-key")
-
+        SUPABASE_URL, SUPABASE_KEY = get_supabase_credentials()
         if not SUPABASE_URL or not SUPABASE_KEY:
             log.error("SUPABASE_URL and SUPABASE_KEY must be provided as env vars or secrets.")
             sys.exit(2)
 
         sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-
         if not hasattr(sb, "table"):
-            log.error("Invalid supabase client; missing .table() method.")
+            log.error("Supabase client does not expose 'table' - check supabase library version.")
             sys.exit(3)
 
+        # Configurable via env
         batch_size = int(os.getenv("BATCH_SIZE", "500"))
-        source_table = "bse_company"
-        target_table = "company_symbols"
+        source_table = os.getenv("SOURCE_TABLE", "bse_company")
+        target_table = os.getenv("TARGET_TABLE", "company_symbols")
+        conflict_key = os.getenv("UPSERT_CONFLICT_KEY", "symbol")
 
         offset = 0
-        total = 0
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        total_processed = 0
+
+        log.info("Starting job: source=%s target=%s batch_size=%d", source_table, target_table, batch_size)
 
         while True:
             resp = sb.table(source_table).select("*").limit(batch_size).offset(offset).execute()
             rows = extract_rows(resp)
             if not rows:
+                if offset == 0:
+                    log.info("No rows to process in source table '%s'.", source_table)
                 break
 
-            out = []
+            normalized = []
+            now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             for r in rows:
-                n = normalize_row(r)
-                if n.get("symbol"):
-                    n["imported_at"] = now
-                    out.append(n)
+                nr = normalize_row(r)
+                if nr.get("symbol"):
+                    nr["imported_at"] = now
+                    normalized.append(nr)
 
-            if out:
-                ok = upsert_safe(sb, target_table, out)
+            if normalized:
+                ok = upsert_rows_with_conflict(sb, target_table, normalized, conflict_key)
                 if not ok:
-                    log.error("Upsert/insert failed at offset=%d", offset)
+                    log.error("Upsert/insert failed at offset=%d — aborting job.", offset)
                     sys.exit(4)
-                total += len(out)
-                log.info("Processed batch offset=%d count=%d total=%d", offset, len(out), total)
+                batch_count = len(normalized)
+                total_processed += batch_count
+                log.info("Processed batch: offset=%d count=%d total=%d", offset, batch_count, total_processed)
+            else:
+                log.info("No valid rows in batch at offset=%d", offset)
 
             offset += batch_size
+            # small delay to avoid DB throttling; tune if necessary
             time.sleep(0.05)
 
-        log.info("Done. Inserted/Upserted %d rows into '%s'.", total, target_table)
+        log.info("Done. Inserted/Upserted approximately %d rows into '%s'.", total_processed, target_table)
         sys.exit(0)
 
     except Exception:
-        log.error("FATAL ERROR:")
+        log.error("FATAL ERROR — full traceback follows:")
         traceback.print_exc()
         sys.exit(5)
 
