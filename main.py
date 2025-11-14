@@ -18,7 +18,7 @@ def main():
         SUPABASE_URL = os.getenv("supabase_url") 
         SUPABASE_KEY = os.getenv("supabase_key")
 
-        print(f"DEBUG: SUPABASE_URL from_env={from_env_url}; SUPABASE_KEY from_env={from_env_key}")
+        print(f"DEBUG: SUPABASE_URL from_env={SUPABASE_URL}; SUPABASE_KEY from_env={SUPABASE_KEY}")
         if not SUPABASE_URL or not SUPABASE_KEY:
             raise RuntimeError("Supabase URL or Key is empty after reading env/secrets.")
 
