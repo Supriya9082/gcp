@@ -33,6 +33,8 @@ def main():
             raise RuntimeError("Supabase client does not have 'table' attribute — check supabase library version.")
 
         resp = sb.table("input_table").select("*").eq("processed", False).limit(batch_size).execute()
+        print("DEBUG: Full Supabase select response:", resp)
+
         # Defensive: resp may be a dict or object
         rows = getattr(resp, "data", None) or (resp.get("data") if isinstance(resp, dict) else None) or []
         print(f"DEBUG: fetched {len(rows)} rows")
