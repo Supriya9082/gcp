@@ -15,10 +15,8 @@ def get_secret(secret_name: str):
 def main():
     try:
         # Prefer env vars (for easier debugging); fall back to Secret Manager
-        from_env_url = bool(os.getenv("SUPABASE_URL"))
-        from_env_key = bool(os.getenv("SUPABASE_KEY"))
-        SUPABASE_URL = os.getenv("SUPABASE_URL") or get_secret("supabase-url")
-        SUPABASE_KEY = os.getenv("SUPABASE_KEY") or get_secret("supabase-key")
+        SUPABASE_URL = os.getenv("supabase_url") 
+        SUPABASE_KEY = os.getenv("supabase_key")
 
         print(f"DEBUG: SUPABASE_URL from_env={from_env_url}; SUPABASE_KEY from_env={from_env_key}")
         if not SUPABASE_URL or not SUPABASE_KEY:
