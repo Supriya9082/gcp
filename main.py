@@ -1,105 +1,148 @@
 # main.py
 import os
+import sys
 import time
 import traceback
+import logging
+
 from supabase import create_client
 
-def get_resp_data(resp):
-    """Return resp.data if object-like else resp.get('data') if dict-like else []"""
-    return getattr(resp, "data", None) or (resp.get("data") if isinstance(resp, dict) else None) or []
+try:
+    from google.cloud import secretmanager
+except Exception:
+    secretmanager = None
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("supabase-job")
+
+
+def read_secret(secret_name: str):
+    """Try to read a secret from Secret Manager (fallback only)."""
+    if secretmanager is None:
+        return None
+    try:
+        project = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT")
+        if not project:
+            return None
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{project}/secrets/{secret_name}/versions/latest"
+        resp = client.access_secret_version(request={"name": name})
+        return resp.payload.data.decode("utf-8")
+    except Exception:
+        return None
+
+
+def extract_rows(resp):
+    """Return response rows from supabase client response."""
+    if resp is None:
+        return []
+    d = getattr(resp, "data", None)
+    if d is None and isinstance(resp, dict):
+        d = resp.get("data")
+    return d or []
+
+
+def normalize_row(r):
+    """Normalize dict- or object-like row into a python dict."""
+    if isinstance(r, dict):
+        return {
+            "symbol": r.get("symbol"),
+            "name": r.get("name"),
+            "listed": r.get("listed")
+        }
+    try:
+        return {
+            "symbol": getattr(r, "symbol", None),
+            "name": getattr(r, "name", None),
+            "listed": getattr(r, "listed", None)
+        }
+    except Exception:
+        return {}
+
+
+def upsert_safe(sb, table, rows):
+    """Try upsert, fallback to insert."""
+    try:
+        up = sb.table(table).upsert(rows).execute()
+        err = getattr(up, "error", None) or (up.get("error") if isinstance(up, dict) else None)
+        if err:
+            log.warning("Upsert returned error: %s. Trying insert fallback.", err)
+            ins = sb.table(table).insert(rows).execute()
+            err2 = getattr(ins, "error", None) or (ins.get("error") if isinstance(ins, dict) else None)
+            if err2:
+                log.error("Insert fallback failed: %s", err2)
+                return False
+        return True
+    except Exception as e:
+        log.warning("Upsert raised exception: %s. Trying insert fallback.", e)
+        try:
+            ins = sb.table(table).insert(rows).execute()
+            err2 = getattr(ins, "error", None) or (ins.get("error") if isinstance(ins, dict) else None)
+            if err2:
+                log.error("Insert fallback failed after exception: %s", err2)
+                return False
+            return True
+        except Exception as ex:
+            log.error("Final fallback failed: %s", ex)
+            return False
+
 
 def main():
     try:
-        SUPABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("supabase_url") or os.getenv("SUPABASE_URL".lower())
-        SUPABASE_KEY = os.getenv("SUPABASE_KEY") or os.getenv("supabase_key") or os.getenv("SUPABASE_KEY".lower())
+        # Prefer env vars; fallback to Secret Manager
+        SUPABASE_URL = os.getenv("SUPABASE_URL") or read_secret("supabase-url")
+        SUPABASE_KEY = os.getenv("SUPABASE_KEY") or read_secret("supabase-key")
+
         if not SUPABASE_URL or not SUPABASE_KEY:
-            raise RuntimeError("SUPABASE_URL and SUPABASE_KEY environment variables must be set.")
+            log.error("SUPABASE_URL and SUPABASE_KEY must be provided as env vars or secrets.")
+            sys.exit(2)
 
         sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-        # Defensive: ensure table API exists
         if not hasattr(sb, "table"):
-            raise RuntimeError("Supabase client does not expose 'table' — check the supabase library version.")
+            log.error("Invalid supabase client; missing .table() method.")
+            sys.exit(3)
 
-        batch_size = int(os.getenv("BATCH_SIZE", "500"))  # how many rows to fetch per page
+        batch_size = int(os.getenv("BATCH_SIZE", "500"))
+        source_table = "bse_company"
+        target_table = "company_symbols"
 
-        # We'll page through the bse_company table to avoid too-large fetches
         offset = 0
-        total_inserted = 0
+        total = 0
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
         while True:
-            resp = sb.table("bse_company").select("*").limit(batch_size).offset(offset).execute()
-            rows = get_resp_data(resp)
+            resp = sb.table(source_table).select("*").limit(batch_size).offset(offset).execute()
+            rows = extract_rows(resp)
             if not rows:
                 break
 
-            # Normalize rows to dicts if they are objects (some clients return objects)
-            normalized = []
+            out = []
             for r in rows:
-                if isinstance(r, dict):
-                    normalized.append(r)
-                else:
-                    # try to pull attributes -> convert to dict
-                    try:
-                        d = {k: getattr(r, k) for k in dir(r) if not k.startswith("_") and not callable(getattr(r, k))}
-                        # keep only common fields (symbol, name, listed) if present
-                        normalized.append(d)
-                    except Exception:
-                        # fallback: try to use .get if available
-                        try:
-                            normalized.append({ "symbol": r.get("symbol"), "name": r.get("name"), "listed": r.get("listed") })
-                        except Exception:
-                            continue
+                n = normalize_row(r)
+                if n.get("symbol"):
+                    n["imported_at"] = now
+                    out.append(n)
 
-            # Build rows for target table
-            now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            out_rows = []
-            for r in normalized:
-                # keep only the fields we care about; tolerate missing fields
-                out_rows.append({
-                    "symbol": r.get("symbol") if isinstance(r, dict) else None,
-                    "name": r.get("name") if isinstance(r, dict) else None,
-                    "listed": r.get("listed") if isinstance(r, dict) else None,
-                    "imported_at": now
-                })
+            if out:
+                ok = upsert_safe(sb, target_table, out)
+                if not ok:
+                    log.error("Upsert/insert failed at offset=%d", offset)
+                    sys.exit(4)
+                total += len(out)
+                log.info("Processed batch offset=%d count=%d total=%d", offset, len(out), total)
 
-            # remove any rows without a symbol (can't dedupe/identify otherwise)
-            out_rows = [o for o in out_rows if o.get("symbol")]
-
-            if out_rows:
-                # Try upsert if available; fallback to insert
-                try:
-                    # Many supabase clients support upsert(..., on_conflict='symbol') or upsert(...)
-                    # We'll attempt a plain upsert first.
-                    up = sb.table("company_symbols").upsert(out_rows).execute()
-                    # Check for error in either object or dict response
-                    err = getattr(up, "error", None) or (up.get("error") if isinstance(up, dict) else None)
-                    if err:
-                        # try insert as fallback
-                        ins = sb.table("company_symbols").insert(out_rows).execute()
-                        err2 = getattr(ins, "error", None) or (ins.get("error") if isinstance(ins, dict) else None)
-                        if err2:
-                            print("ERROR: insert/upsert failed:", err2)
-                            raise SystemExit(1)
-                except Exception as e:
-                    # final fallback: try insert
-                    ins = sb.table("company_symbols").insert(out_rows).execute()
-                    err2 = getattr(ins, "error", None) or (ins.get("error") if isinstance(ins, dict) else None)
-                    if err2:
-                        print("ERROR: fallback insert failed:", err2)
-                        raise
-
-                total_inserted += len(out_rows)
-
-            # advance paging
             offset += batch_size
+            time.sleep(0.05)
 
-        print(f"Done. Inserted/Upserted approximately {total_inserted} rows into 'company_symbols'")
+        log.info("Done. Inserted/Upserted %d rows into '%s'.", total, target_table)
+        sys.exit(0)
 
     except Exception:
-        print("FATAL ERROR — full traceback below:")
+        log.error("FATAL ERROR:")
         traceback.print_exc()
-        raise
+        sys.exit(5)
+
 
 if __name__ == "__main__":
     main()
