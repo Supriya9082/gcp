@@ -102,7 +102,8 @@ def upsert_safe(sb, table_name, rows):
     Returns True on success, False on failure.
     """
     try:
-        up = sb.table(table_name).upsert(rows).execute()
+        up = sb.table(table_name).insert(rows, upsert=True).execute()
+
         err = getattr(up, "error", None) or (up.get("error") if isinstance(up, dict) else None)
         if err:
             log.error("Upsert returned error: %s", err)
