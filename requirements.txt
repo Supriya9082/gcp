@@ -1,4 +1,4 @@
 flask==2.3.2
 gunicorn==21.2.0
-supabase==1.0.0
+supabase-py==1.4.0
 google-cloud-secret-manager==2.17.0
