@@ -3,6 +3,7 @@ import os, json, time, traceback
 from supabase import create_client
 from google.cloud import secretmanager
 
+
 def get_secret(secret_name: str):
     project = os.getenv("PROJECT_ID") or os.getenv("GCP_PROJECT")
     if not project:
